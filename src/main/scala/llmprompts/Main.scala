@@ -62,13 +62,9 @@ object Dumper {
       case (_, prompt) => prompt.timestamp.flatMap(parseTimestamp).getOrElse(Instant.MAX)
     }
     val listing = new StringBuilder
-    var previousSessionId: Option[String] = None
     orderedPrompts.foreach { case (sessionId, prompt) =>
       if (listing.nonEmpty) listing.append("\n\n")
-      if (!previousSessionId.contains(sessionId)) {
-        listing.append(s"Сессия: $sessionId\n")
-        previousSessionId = Some(sessionId)
-      }
+      listing.append(s"Сессия: $sessionId\n")
       prompt.timestamp.foreach(value => listing.append(s"Время запроса: $value\n"))
       listing.append(prompt.text)
     }

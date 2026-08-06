@@ -53,7 +53,7 @@ Each file contains:
 - session IDs and the number of prompts in each session;
 - the original working directory;
 - all user prompts ordered chronologically;
-- the session ID whenever the chronological stream switches sessions;
+- the session ID before every prompt;
 - the ISO 8601 timestamp of every prompt.
 
 Existing `prompts.txt` files for working directories found during a run are replaced completely. Prompts are not appended or duplicated. The exporter does not remove stale files for working directories that are no longer present in the input sessions.
