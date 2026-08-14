@@ -8,18 +8,33 @@ import scala.util.{Failure, Success, Try, Using}
 
 object Main {
   def main(args: Array[String]): Unit = {
-    if (args.length != 2) {
-      Console.err.println("Usage: llm-prompt-dumper <sessions-directory> <output-directory>")
+    if (args.nonEmpty) {
+      Console.err.println("Usage: llm-prompt-dumper")
       sys.exit(2)
     }
 
-    val input = Paths.get(args(0)).toAbsolutePath.normalize
-    val output = Paths.get(args(1)).toAbsolutePath.normalize
-    require(Files.isDirectory(input), s"Sessions directory does not exist: $input")
-    require(input != output && !input.startsWith(output), "Input and output directories must not overlap")
-
-    val dumped = Dumper.dump(input, output)
-    println(s"Exported $dumped session(s) to $output")
+    val config = AppConfig.load()
+    val output = config.outputDirectory
+    var exportedAny = false
+    config.codexSessionsDirectory.foreach { input =>
+      require(Files.isDirectory(input), s"Codex sessions directory does not exist: $input")
+      require(input != output && !input.startsWith(output), "Input and output directories must not overlap")
+      val dumped = Dumper.dump(input, output)
+      println(s"Exported $dumped Codex session(s) from $input to ${output.resolve(Dumper.CodexDirectoryName)}")
+      exportedAny = true
+    }
+    val deepSeekExport = config.deepSeekConversationsArchive.map { archive =>
+      require(Files.isRegularFile(archive), s"DeepSeek conversations archive does not exist: $archive")
+      archive -> DeepSeekDumper.dumpArchive(archive, output)
+    }.orElse(config.deepSeekConversationsFile.map { conversationsFile =>
+      require(Files.isRegularFile(conversationsFile), s"DeepSeek conversations file does not exist: $conversationsFile")
+      conversationsFile -> DeepSeekDumper.dump(conversationsFile, output)
+    })
+    deepSeekExport.foreach { case (source, prompts) =>
+      println(s"Exported $prompts DeepSeek prompt(s) from $source to ${output.resolve(DeepSeekDumper.DeepSeekDirectoryName)}")
+      exportedAny = true
+    }
+    if (!exportedAny) println("No configured sources; nothing to export.")
   }
 }
 
@@ -32,7 +47,10 @@ final case class Session(
 final case class Prompt(text: String, timestamp: Option[String])
 
 object Dumper {
+  val CodexDirectoryName = "codex"
+
   def dump(input: Path, output: Path): Int = {
+    val codexOutput = output.resolve(CodexDirectoryName)
     val files = Using.resource(Files.walk(input))(_.iterator.asScala.filter(Files.isRegularFile(_)).toVector)
     val codexFiles = files.filter(_.getFileName.toString.endsWith(".jsonl"))
 
@@ -45,8 +63,9 @@ object Dumper {
     }
 
     sessionsWithDirectory.groupBy(_.workingDirectory.get).foreach { case (workingDirectory, grouped) =>
-      write(output, workingDirectory, grouped)
+      write(codexOutput, workingDirectory, grouped)
     }
+    writeAll(codexOutput, sessionsWithDirectory)
     sessionsWithDirectory.size
   }
 
@@ -71,6 +90,29 @@ object Dumper {
 
     val body = s"Сессии:\n$summary\n\nРабочая папка: $workingDirectory\n\nПромты:\n$listing"
     Files.writeString(directory.resolve("prompts.txt"), body, StandardCharsets.UTF_8,
+      StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING)
+  }
+
+  private def writeAll(output: Path, sessions: Vector[Session]): Unit = {
+    Files.createDirectories(output)
+    val orderedSessions = sessions.sortBy(session => session.prompts.flatMap(_.timestamp).minOption)
+    val summary = orderedSessions.map(session => s"${session.id}: ${session.prompts.size} промтов").mkString("\n")
+    val orderedPrompts = sessions.flatMap { session =>
+      session.prompts.map(prompt => (session.id, session.workingDirectory.get, prompt))
+    }.sortBy { case (_, _, prompt) =>
+      prompt.timestamp.flatMap(parseTimestamp).getOrElse(Instant.MAX)
+    }
+    val listing = new StringBuilder
+    orderedPrompts.foreach { case (sessionId, workingDirectory, prompt) =>
+      if (listing.nonEmpty) listing.append("\n\n")
+      listing.append(s"Сессия: $sessionId\n")
+      listing.append(s"Рабочая папка: $workingDirectory\n")
+      prompt.timestamp.foreach(value => listing.append(s"Время запроса: $value\n"))
+      listing.append(prompt.text)
+    }
+
+    val body = s"Сессии:\n$summary\n\nПромты:\n$listing"
+    Files.writeString(output.resolve("all-prompts.txt"), body, StandardCharsets.UTF_8,
       StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING)
   }
 

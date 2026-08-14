@@ -23,6 +23,12 @@ class ParserSuite extends munit.FunSuite {
         |{"timestamp":"2026-08-02T06:18:00.000Z","type":"event_msg","payload":{"type":"user_message","message":"middle prompt"}}
         |""".stripMargin, StandardCharsets.UTF_8)
 
+    val otherDir = Files.createDirectories(root.resolve("2026/08/03"))
+    Files.writeString(otherDir.resolve("rollout-3.jsonl"),
+      """{"type":"session_meta","payload":{"id":"session-3","cwd":"/other/project"}}
+        |{"timestamp":"2026-08-02T06:17:30.000Z","type":"event_msg","payload":{"type":"user_message","message":"other prompt"}}
+        |""".stripMargin, StandardCharsets.UTF_8)
+
     val session = CodexParser.parse(file).get
     assertEquals(session.id, "session-1")
     assertEquals(session.prompts, Vector(
@@ -33,8 +39,8 @@ class ParserSuite extends munit.FunSuite {
     assertEquals(session.workingDirectory, Some("/work/project"))
 
     val output = Files.createTempDirectory("codex-output")
-    assertEquals(Dumper.dump(root, output), 2)
-    val text = Files.readString(output.resolve("work/project/prompts.txt"), StandardCharsets.UTF_8)
+    assertEquals(Dumper.dump(root, output), 3)
+    val text = Files.readString(output.resolve("codex/work/project/prompts.txt"), StandardCharsets.UTF_8)
     assertEquals(text,
       "Сессии:\nsession-1: 3 промтов\nsession-2: 1 промтов\n\n" +
       "Рабочая папка: /work/project\n\nПромты:\n" +
@@ -42,6 +48,15 @@ class ParserSuite extends munit.FunSuite {
       "Сессия: session-2\nВремя запроса: 2026-08-02T06:18:00.000Z\nmiddle prompt\n\n" +
       "Сессия: session-1\nВремя запроса: 2026-08-02T06:18:20.000Z\nsecond prompt\n\n" +
       "Сессия: session-1\nВремя запроса: 2026-08-02T06:18:30.000Z\nthird prompt")
+
+    val allText = Files.readString(output.resolve("codex/all-prompts.txt"), StandardCharsets.UTF_8)
+    assertEquals(allText,
+      "Сессии:\nsession-1: 3 промтов\nsession-3: 1 промтов\nsession-2: 1 промтов\n\nПромты:\n" +
+      "Сессия: session-1\nРабочая папка: /work/project\nВремя запроса: 2026-08-02T06:17:17.230Z\nfirst prompt\n\n" +
+      "Сессия: session-3\nРабочая папка: /other/project\nВремя запроса: 2026-08-02T06:17:30.000Z\nother prompt\n\n" +
+      "Сессия: session-2\nРабочая папка: /work/project\nВремя запроса: 2026-08-02T06:18:00.000Z\nmiddle prompt\n\n" +
+      "Сессия: session-1\nРабочая папка: /work/project\nВремя запроса: 2026-08-02T06:18:20.000Z\nsecond prompt\n\n" +
+      "Сессия: session-1\nРабочая папка: /work/project\nВремя запроса: 2026-08-02T06:18:30.000Z\nthird prompt")
   }
 
   test("Codex parser ignores internal subagent sessions") {
