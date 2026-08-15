@@ -2,15 +2,18 @@ package llmprompts
 
 import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, Path, Paths}
+import java.time.ZoneOffset
 import java.util.Properties
 import scala.jdk.CollectionConverters._
 import scala.util.Using
 
 final case class AppConfig(
     codexSessionsDirectory: Option[Path],
+    deepSeekConversationsDirectory: Option[Path],
     deepSeekConversationsFile: Option[Path],
     deepSeekConversationsArchive: Option[Path],
-    outputDirectory: Path
+    outputDirectory: Path,
+    timezoneOffset: ZoneOffset
 )
 
 object AppConfig {
@@ -18,10 +21,14 @@ object AppConfig {
   val OutputProperty = "output.directory"
   val DeepSeekConversationsProperty = "deepseek.conversations.file"
   val DeepSeekConversationsArchiveProperty = "deepseek.conversations.archive"
+  val DeepSeekConversationsDirectoryProperty = "deepseek.conversations.directory"
+  val TimezoneOffsetHoursProperty = "timezone.offset.hours"
   val SessionsEnvironment = "LLM_PROMPTS_CODEX_SESSIONS_DIRECTORY"
   val OutputEnvironment = "LLM_PROMPTS_OUTPUT_DIRECTORY"
   val DeepSeekConversationsEnvironment = "LLM_PROMPTS_DEEPSEEK_CONVERSATIONS_FILE"
   val DeepSeekConversationsArchiveEnvironment = "LLM_PROMPTS_DEEPSEEK_CONVERSATIONS_ARCHIVE"
+  val DeepSeekConversationsDirectoryEnvironment = "LLM_PROMPTS_DEEPSEEK_CONVERSATIONS_DIRECTORY"
+  val TimezoneOffsetHoursEnvironment = "LLM_PROMPTS_TIMEZONE_OFFSET_HOURS"
   val XdgConfigHomeEnvironment = "XDG_CONFIG_HOME"
 
   def load(): AppConfig = {
@@ -46,11 +53,18 @@ object AppConfig {
       properties, DeepSeekConversationsProperty, environment, DeepSeekConversationsEnvironment)
     val deepSeekArchive = optionalSetting(
       properties, DeepSeekConversationsArchiveProperty, environment, DeepSeekConversationsArchiveEnvironment)
+    val deepSeekDirectory = optionalSetting(
+      properties, DeepSeekConversationsDirectoryProperty, environment, DeepSeekConversationsDirectoryEnvironment)
+    val timezoneOffset = optionalSetting(
+      properties, TimezoneOffsetHoursProperty, environment, TimezoneOffsetHoursEnvironment)
+      .map(parseTimezoneOffset).getOrElse(ZoneOffset.ofHours(3))
     AppConfig(
       sessions.map(resolvePath(_, home)),
+      deepSeekDirectory.map(resolvePath(_, home)),
       deepSeek.map(resolvePath(_, home)),
       deepSeekArchive.map(resolvePath(_, home)),
-      resolvePath(output, home)
+      resolvePath(output, home),
+      timezoneOffset
     )
   }
 
@@ -91,4 +105,13 @@ object AppConfig {
       else Paths.get(value)
     expanded.toAbsolutePath.normalize
   }
+
+  private def parseTimezoneOffset(value: String): ZoneOffset =
+    try ZoneOffset.ofHours(value.toInt)
+    catch {
+      case _: NumberFormatException => throw new IllegalArgumentException(
+        s"'$TimezoneOffsetHoursProperty' must be an integer number of hours from -18 to +18: $value")
+      case _: java.time.DateTimeException => throw new IllegalArgumentException(
+        s"'$TimezoneOffsetHoursProperty' must be an integer number of hours from -18 to +18: $value")
+    }
 }

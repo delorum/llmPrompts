@@ -29,9 +29,11 @@ mkdir -p ~/.config/llm-prompts
 ```properties
 # ~/.config/llm-prompts/config.properties
 codex.sessions.directory=~/.codex/sessions
+deepseek.conversations.directory=~/Downloads
 deepseek.conversations.file=~/Downloads/deepseek-conversations.json
 deepseek.conversations.archive=~/Downloads/deepseek-data.zip
 output.directory=~/llm-prompt-dumps
+timezone.offset.hours=3
 ```
 
 Поддерживаемые свойства и соответствующие переменные окружения:
@@ -39,19 +41,25 @@ output.directory=~/llm-prompt-dumps
 | Свойство | Переменная окружения | Назначение |
 | --- | --- | --- |
 | `codex.sessions.directory` | `LLM_PROMPTS_CODEX_SESSIONS_DIRECTORY` | Корневая папка с JSONL-сессиями Codex (необязательно) |
+| `deepseek.conversations.directory` | `LLM_PROMPTS_DEEPSEEK_CONVERSATIONS_DIRECTORY` | Папка с архивами `deepseek_data-YYYY-MM-DD.zip` (необязательно, наивысший приоритет DeepSeek) |
 | `deepseek.conversations.file` | `LLM_PROMPTS_DEEPSEEK_CONVERSATIONS_FILE` | JSON-файл с беседами DeepSeek (необязательно) |
 | `deepseek.conversations.archive` | `LLM_PROMPTS_DEEPSEEK_CONVERSATIONS_ARCHIVE` | ZIP-архив DeepSeek с файлом `conversations.json` (необязательно, имеет приоритет над JSON-файлом) |
 | `output.directory` | `LLM_PROMPTS_OUTPUT_DIRECTORY` | Папка для записи выгрузки |
+| `timezone.offset.hours` | `LLM_PROMPTS_TIMEZONE_OFFSET_HOURS` | Часовой пояс вывода: целое число часов от GMT от `-18` до `+18` (необязательно, по умолчанию Москва, `+3`) |
 
 Значения из `config.properties` имеют приоритет. Fallback применяется отдельно к каждой настройке, поэтому файл и переменные окружения можно комбинировать. Пути, начинающиеся с `~/`, раскрываются относительно домашнего каталога текущего пользователя.
 
-Также можно задать обе настройки только через окружение:
+Все timestamp в выгрузке преобразуются в заданное фиксированное смещение относительно GMT. Если `timezone.offset.hours` отсутствует, используется московское время (`GMT+3`). Это фиксированное смещение без правил перехода на летнее время.
+
+Также можно задать настройки только через окружение:
 
 ```bash
 export LLM_PROMPTS_CODEX_SESSIONS_DIRECTORY="$HOME/.codex/sessions"
+export LLM_PROMPTS_DEEPSEEK_CONVERSATIONS_DIRECTORY="$HOME/Downloads"
 export LLM_PROMPTS_DEEPSEEK_CONVERSATIONS_FILE="$HOME/Downloads/deepseek-conversations.json"
 export LLM_PROMPTS_DEEPSEEK_CONVERSATIONS_ARCHIVE="$HOME/Downloads/deepseek-data.zip"
 export LLM_PROMPTS_OUTPUT_DIRECTORY="$HOME/llm-prompt-dumps"
+export LLM_PROMPTS_TIMEZONE_OFFSET_HOURS="+3"
 ```
 
 Запускайте программу без аргументов из каталога проекта:
@@ -86,7 +94,11 @@ Codex выгружается только тогда, когда настрое�
 
 ### DeepSeek
 
-Данные DeepSeek можно передать как JSON-файл через `deepseek.conversations.file` или как ZIP-архив через `deepseek.conversations.archive`. Архив должен содержать ровно один `conversations.json`. Если заданы обе настройки, архив имеет приоритет.
+Данные DeepSeek можно передать как папку через `deepseek.conversations.directory`, ZIP-архив через `deepseek.conversations.archive` или JSON-файл через `deepseek.conversations.file`. Приоритет: папка, затем архив, затем JSON-файл.
+
+В режиме папки читаются все обычные файлы с именами вида `deepseek_data-YYYY-MM-DD.zip`. Каждый архив должен содержать ровно один `conversations.json`. Промты, повторяющиеся между архивами, дедуплицируются по ID беседы, timestamp и тексту, поэтому новый архив с полной историей можно просто положить рядом со старыми.
+
+Нечитаемый архив, отсутствие `conversations.json`, некорректный JSON или неподдерживаемый корневой формат репортятся в stderr, после чего архив пропускается. Из частично корректного JSON выгружаются все пригодные REQUEST-фрагменты, а некорректные беседы, сообщения или фрагменты пропускаются и группируются в предупреждения с количеством. Затем обработка продолжается со следующими архивами.
 
 Программа читает `message.fragments[].content` из фрагментов с типом `REQUEST`. Промты сортируются по `message.inserted_at` и записываются в один файл:
 
@@ -94,7 +106,17 @@ Codex выгружается только тогда, когда настрое�
 <выходная-папка>/deepseek/all-prompts.txt
 ```
 
-Настройки DeepSeek необязательны. Если обе отсутствуют, DeepSeek пропускается. Если не настроены ни Codex, ни DeepSeek, программа успешно завершается без выгрузки. `output.directory` остаётся обязательной настройкой.
+Настройки DeepSeek необязательны. Если все они отсутствуют, DeepSeek пропускается. Если не настроены ни Codex, ни DeepSeek, программа успешно завершается без выгрузки. `output.directory` остаётся обязательной настройкой.
+
+### Общая выгрузка
+
+Если настроен хотя бы один источник, программа также создаёт:
+
+```text
+<выходная-папка>/all-prompts.txt
+```
+
+В этом файле промты Codex и DeepSeek объединены в единый хронологический поток. Для каждого промта указываются тип `LLM` (`codex` или `deepseek`), ID сессии, timestamp, текст и рабочая папка, если источник содержит такую информацию.
 
 ## Тесты
 

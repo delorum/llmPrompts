@@ -2,7 +2,7 @@ package llmprompts
 
 import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, Path, Paths, StandardOpenOption}
-import java.time.Instant
+import java.time.{Instant, ZoneOffset}
 import scala.jdk.CollectionConverters._
 import scala.util.{Failure, Success, Try, Using}
 
@@ -16,25 +16,34 @@ object Main {
     val config = AppConfig.load()
     val output = config.outputDirectory
     var exportedAny = false
+    var combinedPrompts = Vector.empty[CombinedPrompt]
     config.codexSessionsDirectory.foreach { input =>
       require(Files.isDirectory(input), s"Codex sessions directory does not exist: $input")
       require(input != output && !input.startsWith(output), "Input and output directories must not overlap")
-      val dumped = Dumper.dump(input, output)
-      println(s"Exported $dumped Codex session(s) from $input to ${output.resolve(Dumper.CodexDirectoryName)}")
+      val result = Dumper.dumpWithPrompts(input, output, config.timezoneOffset)
+      combinedPrompts ++= result.prompts
+      println(s"Exported ${result.sessionCount} Codex session(s) from $input to ${output.resolve(Dumper.CodexDirectoryName)}")
       exportedAny = true
     }
-    val deepSeekExport = config.deepSeekConversationsArchive.map { archive =>
+    val deepSeekExport = config.deepSeekConversationsDirectory.map { directory =>
+      require(Files.isDirectory(directory), s"DeepSeek conversations directory does not exist: $directory")
+      directory -> DeepSeekDumper.dumpDirectoryWithPrompts(directory, output, config.timezoneOffset)
+    }.orElse(config.deepSeekConversationsArchive.map { archive =>
       require(Files.isRegularFile(archive), s"DeepSeek conversations archive does not exist: $archive")
-      archive -> DeepSeekDumper.dumpArchive(archive, output)
-    }.orElse(config.deepSeekConversationsFile.map { conversationsFile =>
+      archive -> DeepSeekDumper.dumpArchiveWithPrompts(archive, output, config.timezoneOffset)
+    }).orElse(config.deepSeekConversationsFile.map { conversationsFile =>
       require(Files.isRegularFile(conversationsFile), s"DeepSeek conversations file does not exist: $conversationsFile")
-      conversationsFile -> DeepSeekDumper.dump(conversationsFile, output)
+      conversationsFile -> DeepSeekDumper.dumpWithPrompts(conversationsFile, output, config.timezoneOffset)
     })
-    deepSeekExport.foreach { case (source, prompts) =>
-      println(s"Exported $prompts DeepSeek prompt(s) from $source to ${output.resolve(DeepSeekDumper.DeepSeekDirectoryName)}")
+    deepSeekExport.foreach { case (source, result) =>
+      combinedPrompts ++= result.prompts
+      println(s"Exported ${result.promptCount} DeepSeek prompt(s) from $source to ${output.resolve(DeepSeekDumper.DeepSeekDirectoryName)}")
       exportedAny = true
     }
-    if (!exportedAny) println("No configured sources; nothing to export.")
+    if (exportedAny) {
+      CombinedDumper.write(output, combinedPrompts, config.timezoneOffset)
+      println(s"Exported ${combinedPrompts.size} combined prompt(s) to ${output.resolve("all-prompts.txt")}")
+    } else println("No configured sources; nothing to export.")
   }
 }
 
@@ -49,7 +58,10 @@ final case class Prompt(text: String, timestamp: Option[String])
 object Dumper {
   val CodexDirectoryName = "codex"
 
-  def dump(input: Path, output: Path): Int = {
+  def dump(input: Path, output: Path): Int =
+    dumpWithPrompts(input, output, TimestampFormatter.MoscowOffset).sessionCount
+
+  def dumpWithPrompts(input: Path, output: Path, timezoneOffset: ZoneOffset): CodexExport = {
     val codexOutput = output.resolve(CodexDirectoryName)
     val files = Using.resource(Files.walk(input))(_.iterator.asScala.filter(Files.isRegularFile(_)).toVector)
     val codexFiles = files.filter(_.getFileName.toString.endsWith(".jsonl"))
@@ -63,13 +75,19 @@ object Dumper {
     }
 
     sessionsWithDirectory.groupBy(_.workingDirectory.get).foreach { case (workingDirectory, grouped) =>
-      write(codexOutput, workingDirectory, grouped)
+      write(codexOutput, workingDirectory, grouped, timezoneOffset)
     }
-    writeAll(codexOutput, sessionsWithDirectory)
-    sessionsWithDirectory.size
+    writeAll(codexOutput, sessionsWithDirectory, timezoneOffset)
+    val prompts = sessionsWithDirectory.flatMap { session =>
+      session.prompts.map { prompt =>
+        CombinedPrompt("codex", session.id, session.workingDirectory, prompt.text, prompt.timestamp)
+      }
+    }
+    CodexExport(sessionsWithDirectory.size, prompts)
   }
 
-  private def write(output: Path, workingDirectory: String, sessions: Vector[Session]): Unit = {
+  private def write(
+      output: Path, workingDirectory: String, sessions: Vector[Session], timezoneOffset: ZoneOffset): Unit = {
     val relativeDirectory = relativeWorkingDirectory(workingDirectory)
     val directory = output.resolve(relativeDirectory).normalize
     require(directory.startsWith(output), s"Unsafe working directory: $workingDirectory")
@@ -84,7 +102,8 @@ object Dumper {
     orderedPrompts.foreach { case (sessionId, prompt) =>
       if (listing.nonEmpty) listing.append("\n\n")
       listing.append(s"Сессия: $sessionId\n")
-      prompt.timestamp.foreach(value => listing.append(s"Время запроса: $value\n"))
+      prompt.timestamp.foreach(value =>
+        listing.append(s"Время запроса: ${TimestampFormatter.format(value, timezoneOffset)}\n"))
       listing.append(prompt.text)
     }
 
@@ -93,7 +112,7 @@ object Dumper {
       StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING)
   }
 
-  private def writeAll(output: Path, sessions: Vector[Session]): Unit = {
+  private def writeAll(output: Path, sessions: Vector[Session], timezoneOffset: ZoneOffset): Unit = {
     Files.createDirectories(output)
     val orderedSessions = sessions.sortBy(session => session.prompts.flatMap(_.timestamp).minOption)
     val summary = orderedSessions.map(session => s"${session.id}: ${session.prompts.size} промтов").mkString("\n")
@@ -107,7 +126,8 @@ object Dumper {
       if (listing.nonEmpty) listing.append("\n\n")
       listing.append(s"Сессия: $sessionId\n")
       listing.append(s"Рабочая папка: $workingDirectory\n")
-      prompt.timestamp.foreach(value => listing.append(s"Время запроса: $value\n"))
+      prompt.timestamp.foreach(value =>
+        listing.append(s"Время запроса: ${TimestampFormatter.format(value, timezoneOffset)}\n"))
       listing.append(prompt.text)
     }
 
@@ -125,6 +145,8 @@ object Dumper {
 
   private def parseTimestamp(value: String): Option[Instant] = Try(Instant.parse(value)).toOption
 }
+
+final case class CodexExport(sessionCount: Int, prompts: Vector[CombinedPrompt])
 
 object CodexParser {
   def parse(file: Path): Option[Session] = Try {
