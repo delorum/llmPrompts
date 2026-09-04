@@ -90,7 +90,7 @@ Each file contains:
 
 The exporter also creates `<output-directory>/codex/all-prompts.txt`. This file combines prompts from every working directory in a single chronological stream. It uses the same format, with the working directory additionally written before every prompt.
 
-Existing `prompts.txt` files and `all-prompts.txt` are replaced completely during a run. Prompts are not appended or duplicated. The exporter does not remove stale files for working directories that are no longer present in the input sessions.
+Codex export is cumulative. Newly discovered prompts are merged with previously exported prompts and deduplicated; prompts already stored in the export are retained even when their source JSONL session is later removed. A hidden `codex/.prompts-state.json` file stores the structured append state. Do not delete it unless you intend to rebuild the Codex history from the currently available sessions. Existing installations without this state file are migrated once from `codex/all-prompts.txt`. The per-working-directory files and `codex/all-prompts.txt` are regenerated chronologically from the accumulated state.
 
 ### DeepSeek
 
@@ -106,6 +106,8 @@ The exporter reads `message.fragments[].content` from fragments whose type is `R
 <output-directory>/deepseek/all-prompts.txt
 ```
 
+DeepSeek export is cumulative. Newly discovered prompts are merged with previously exported prompts and deduplicated; prompts already stored in the export are retained even when their source archive is later removed. A hidden `deepseek/.prompts-state.json` file stores the structured append state. Do not delete it unless you intend to rebuild the DeepSeek history from the currently available inputs. Existing installations without this state file are migrated once from `deepseek/all-prompts.txt`.
+
 The DeepSeek settings are optional. If all of them are absent, DeepSeek is skipped. If neither Codex nor DeepSeek is configured, the application exits successfully without exporting anything. `output.directory` remains required.
 
 ### Combined export
@@ -116,7 +118,7 @@ When at least one source is configured, the application also creates:
 <output-directory>/all-prompts.txt
 ```
 
-This file combines Codex and DeepSeek prompts in one chronological stream. Every prompt includes its `LLM` type (`codex` or `deepseek`), session ID, timestamp, text, and the working directory when available for that source.
+This file combines the cumulative Codex and DeepSeek histories in one chronological stream. Every prompt includes its `LLM` type (`codex` or `deepseek`), session ID, timestamp, text, and the working directory when available for that source.
 
 ## Tests
 

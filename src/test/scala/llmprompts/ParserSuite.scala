@@ -70,4 +70,59 @@ class ParserSuite extends munit.FunSuite {
     assertEquals(CodexParser.parse(file), None)
   }
 
+  test("Codex export keeps prompts after their source sessions disappear") {
+    val firstInput = Files.createTempDirectory("codex-first-input")
+    writeSession(firstInput, "old-session", "/work/project", "2026-08-14T08:30:00Z", "old prompt")
+    val output = Files.createTempDirectory("codex-append-output")
+
+    val first = Dumper.dumpWithPrompts(firstInput, output, TimestampFormatter.MoscowOffset)
+    assertEquals((first.newPromptCount, first.promptCount, first.sessionCount), (1, 1, 1))
+
+    val secondInput = Files.createTempDirectory("codex-second-input")
+    writeSession(secondInput, "new-session", "/work/project", "2026-08-15T08:30:00Z", "new prompt")
+    val second = Dumper.dumpWithPrompts(secondInput, output, TimestampFormatter.MoscowOffset)
+    assertEquals((second.newPromptCount, second.promptCount, second.sessionCount), (1, 2, 2))
+
+    val third = Dumper.dumpWithPrompts(secondInput, output, TimestampFormatter.MoscowOffset)
+    assertEquals((third.newPromptCount, third.promptCount, third.sessionCount), (0, 2, 2))
+    val text = Files.readString(output.resolve("codex/all-prompts.txt"), StandardCharsets.UTF_8)
+    assertEquals("old prompt".r.findAllIn(text).length, 1)
+    assertEquals("new prompt".r.findAllIn(text).length, 1)
+    assert(Files.isRegularFile(output.resolve("codex/.prompts-state.json")))
+  }
+
+  test("Codex export migrates an existing aggregate text file before appending") {
+    val output = Files.createTempDirectory("codex-migration-output")
+    val codexOutput = Files.createDirectories(output.resolve("codex"))
+    Files.writeString(codexOutput.resolve("all-prompts.txt"),
+      "Сессии:\nold-session: 1 промтов\n\nПромты:\n" +
+      "Сессия: old-session\nРабочая папка: /old/project\n" +
+      "Время запроса: 2026-08-14T11:30:00+03:00\nold migrated prompt",
+      StandardCharsets.UTF_8)
+    val input = Files.createTempDirectory("codex-migration-input")
+    writeSession(input, "new-session", "/new/project", "2026-08-15T08:30:00Z", "new prompt")
+
+    val result = Dumper.dumpWithPrompts(input, output, TimestampFormatter.MoscowOffset)
+
+    assertEquals((result.newPromptCount, result.promptCount, result.sessionCount), (1, 2, 2))
+    val text = Files.readString(codexOutput.resolve("all-prompts.txt"), StandardCharsets.UTF_8)
+    assert(text.contains("old migrated prompt"))
+    assert(text.contains("new prompt"))
+  }
+
+  private def writeSession(
+      root: java.nio.file.Path,
+      sessionId: String,
+      workingDirectory: String,
+      timestamp: String,
+      prompt: String
+  ): Unit = {
+    val content =
+      ujson.Obj("type" -> "session_meta", "payload" -> ujson.Obj(
+        "id" -> sessionId, "cwd" -> workingDirectory)).render() + "\n" +
+      ujson.Obj("timestamp" -> timestamp, "type" -> "event_msg", "payload" -> ujson.Obj(
+        "type" -> "user_message", "message" -> prompt)).render() + "\n"
+    Files.writeString(root.resolve(s"$sessionId.jsonl"), content, StandardCharsets.UTF_8)
+  }
+
 }

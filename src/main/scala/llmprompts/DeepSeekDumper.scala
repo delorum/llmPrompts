@@ -1,7 +1,7 @@
 package llmprompts
 
 import java.nio.charset.StandardCharsets
-import java.nio.file.{Files, Path, StandardOpenOption}
+import java.nio.file.{Files, Path}
 import java.time.{Instant, ZoneOffset}
 import java.util.zip.ZipFile
 import scala.jdk.CollectionConverters._
@@ -11,10 +11,11 @@ import scala.util.Using
 import scala.util.control.NonFatal
 
 final case class DeepSeekPrompt(conversationId: String, text: String, timestamp: String)
-final case class DeepSeekExport(promptCount: Int, prompts: Vector[CombinedPrompt])
+final case class DeepSeekExport(promptCount: Int, newPromptCount: Int, prompts: Vector[CombinedPrompt])
 
 object DeepSeekDumper {
   val DeepSeekDirectoryName = "deepseek"
+  private val StateFileName = ".prompts-state.json"
   private val ArchiveName = raw"deepseek_data-\d{4}-\d{2}-\d{2}\.zip".r
 
   def dump(conversationsFile: Path, output: Path): Int = {
@@ -82,9 +83,14 @@ object DeepSeekDumper {
 
   private def dumpPrompts(
       sourcePrompts: Vector[DeepSeekPrompt], output: Path, timezoneOffset: ZoneOffset): DeepSeekExport = {
-    val prompts = sourcePrompts.sortBy(prompt => parseTimestamp(prompt.timestamp))
     val directory = output.resolve(DeepSeekDirectoryName)
     Files.createDirectories(directory)
+    val existingPrompts = loadExistingPrompts(directory)
+    val existingKeys = existingPrompts.iterator.map(deduplicationKey).toSet
+    val uniqueSourcePrompts = sourcePrompts.distinctBy(deduplicationKey)
+    val newPrompts = uniqueSourcePrompts.filterNot(prompt => existingKeys(deduplicationKey(prompt)))
+    val prompts = (existingPrompts ++ newPrompts).distinctBy(deduplicationKey)
+      .sortBy(prompt => parseTimestamp(prompt.timestamp))
     val summary = prompts.groupBy(_.conversationId).toVector
       .sortBy { case (_, conversationPrompts) => parseTimestamp(conversationPrompts.map(_.timestamp).min) }
       .map { case (conversationId, conversationPrompts) =>
@@ -95,12 +101,69 @@ object DeepSeekDumper {
       s"Сессия: ${prompt.conversationId}\nВремя запроса: $timestamp\n${prompt.text}"
     }.mkString("\n\n")
     val body = s"Сессии:\n$summary\n\nПромты:\n$listing"
-    Files.writeString(directory.resolve("all-prompts.txt"), body, StandardCharsets.UTF_8,
-      StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING)
-    DeepSeekExport(prompts.size, prompts.map { prompt =>
+    writeState(directory.resolve(StateFileName), prompts)
+    AtomicFileWriter.write(directory.resolve("all-prompts.txt"), body)
+    DeepSeekExport(prompts.size, newPrompts.size, prompts.map { prompt =>
       CombinedPrompt("deepseek", prompt.conversationId, None, prompt.text, Some(prompt.timestamp))
     })
   }
+
+  private def loadExistingPrompts(directory: Path): Vector[DeepSeekPrompt] = {
+    val stateFile = directory.resolve(StateFileName)
+    if (Files.isRegularFile(stateFile)) readState(stateFile)
+    else {
+      val textFile = directory.resolve("all-prompts.txt")
+      if (Files.isRegularFile(textFile)) {
+        val prompts = migrateTextExport(Files.readString(textFile, StandardCharsets.UTF_8))
+        Console.err.println(s"Migrated ${prompts.size} existing DeepSeek prompt(s) from $textFile")
+        prompts
+      } else Vector.empty
+    }
+  }
+
+  private def readState(stateFile: Path): Vector[DeepSeekPrompt] = try {
+    ujson.read(Files.readString(stateFile, StandardCharsets.UTF_8)).arr.toVector.map { value =>
+      val obj = value.obj
+      DeepSeekPrompt(
+        string(obj.get("conversationId")).get,
+        string(obj.get("text")).get,
+        string(obj.get("timestamp")).get
+      )
+    }
+  } catch {
+    case NonFatal(error) => throw new IllegalStateException(
+      s"Cannot read DeepSeek append state $stateFile; refusing to overwrite existing export: ${error.getMessage}", error)
+  }
+
+  private def writeState(stateFile: Path, prompts: Vector[DeepSeekPrompt]): Unit = {
+    val json = ujson.Arr.from(prompts.map { prompt =>
+      ujson.Obj(
+        "conversationId" -> prompt.conversationId,
+        "timestamp" -> prompt.timestamp,
+        "text" -> prompt.text
+      )
+    }).render(indent = 2)
+    AtomicFileWriter.write(stateFile, json)
+  }
+
+  private def migrateTextExport(text: String): Vector[DeepSeekPrompt] = {
+    val listing = text.split("\\n\\nПромты:\\n", 2).lift(1).getOrElse("")
+    val header = "(?m)^Сессия: ([^\\r\\n]+)\\r?\\nВремя запроса: ([^\\r\\n]+)\\r?\\n".r
+    val matches = header.findAllMatchIn(listing).toVector
+    val prompts = matches.zipWithIndex.map { case (entry, index) =>
+      val end = if (index + 1 < matches.size) matches(index + 1).start else listing.length
+      val content = listing.substring(entry.end, end).stripSuffix("\n\n")
+      DeepSeekPrompt(entry.group(1), content, entry.group(2))
+    }.filter(_.text.nonEmpty)
+    if (listing.contains("Сессия:") && prompts.isEmpty)
+      throw new IllegalStateException("Cannot migrate the existing DeepSeek text export; refusing to overwrite it")
+    prompts
+  }
+
+  private def deduplicationKey(prompt: DeepSeekPrompt): (String, String, String) =
+    (prompt.conversationId,
+      TimestampFormatter.instant(prompt.timestamp).map(_.toString).getOrElse(prompt.timestamp),
+      prompt.text)
 
   private[llmprompts] def parse(conversationsFile: Path): Vector[DeepSeekPrompt] = {
     parse(Files.readString(conversationsFile, StandardCharsets.UTF_8))
